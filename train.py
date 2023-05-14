@@ -108,7 +108,7 @@ def main(args):
         loss.backward()
         optim.step()
 
-        if i % CHECKPOINT_INTERVAL == 0:
+        if i != epoch and i % CHECKPOINT_INTERVAL == 0:
             save_checkpoint(i, loss, m, optim)
 
 if __name__ == '__main__':
