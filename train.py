@@ -86,7 +86,7 @@ def main(args):
 
     # load from checkpoint if it exists
     if os.path.isfile(CHECKPOINT_PATH):
-        epoch, loss =load_checkpoint(model, optim)
+        epoch, loss = load_checkpoint(model, optim)
 
     # if we are just generating output and not training
     if args.generate:
@@ -98,7 +98,7 @@ def main(args):
 
     # training loop
     for i in tqdm(range(epoch, MAX_ITERS)):
-        if i % EVAL_INTERVAL == 0:
+        if i != epoch and i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model)
             print(f"step {i} train loss {losses['train']} eval loss {losses['eval']}")
 
