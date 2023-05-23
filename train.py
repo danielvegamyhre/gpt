@@ -76,13 +76,13 @@ def save_checkpoint(path, epoch, loss, model, optim):
             'loss': loss,
             }, path)
 
-def load_checkpoint(model, optim):
-    checkpoint = torch.load(CHECKPOINT_PATH)
+def load_checkpoint(path, model, optim):
+    checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model_state_dict'])
     optim.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
-    print(f'loaded checkpoint from {CHECKPOINT_PATH} at epoch {epoch}')
+    print(f'loaded checkpoint from {path} at epoch {epoch}')
     return epoch, loss
 
 def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
@@ -97,11 +97,11 @@ def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
         with open(args.train) as f:
             text = f.read()
             
-        # tokenize training data
-        DATA[TRAIN] = tokenizer.encode(text).ids
+        encoded = tokenizer.encode(text).ids
+        DATA[TRAIN] = torch.tensor(encoded, dtype=torch.long, device=DEVICE)
 
         # store pre-processed training data 
-        torch.save(torch.tensor(DATA[TRAIN], dtype=torch.long, device=DEVICE), train_out)
+        torch.save(DATA[TRAIN], train_out)
 
     # load preprocessed data if we have it, otherwise preprocess the raw dataset
     if os.path.exists(eval_out):
@@ -112,10 +112,11 @@ def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
             text = f.read()
             
         # tokenize training data
-        DATA[EVAL] = tokenizer.encode(text).ids
+        encoded = tokenizer.encode(text).ids
+        DATA[EVAL] = torch.tensor(encoded, dtype=torch.long, device=DEVICE)
         
         # store pre-processed training data 
-        torch.save(torch.tensor(DATA[EVAL], dtype=torch.long, device=DEVICE), eval_out)
+        torch.save(DATA[EVAL], eval_out)
 
 def main(args: argparse.Namespace):
     print(f'device: {DEVICE}')
