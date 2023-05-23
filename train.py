@@ -5,6 +5,13 @@ import argparse
 from models.gpt import GPT, BATCH_SIZE, SEQ_LEN
 from tqdm import tqdm
 
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.processors import TemplateProcessing
+
+
 # hyperparameters
 MAX_ITERS = 5000
 LEARNING_RATE = 1e-3
@@ -16,6 +23,30 @@ EVAL = 'eval'
 DATA = {TRAIN: '', EVAL: ''}
 CHECKPOINT_PATH = 'model.pt'
 CHECKPOINT_INTERVAL = 1000
+
+def train_tokenizer():
+    output_file ="data/tokenizer-wiki.json"
+    if os.path.exists(output_file):
+        print(f'loading tokenizer from {output_file}')
+        tokenizer = Tokenizer.from_file(output_file)
+    else:
+        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+        trainer = BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"])
+        tokenizer.pre_tokenizer = Whitespace()
+        files = [f"data/wikitext-103-raw/wiki.{split}.raw" for split in ["test", "train", "valid"]]
+        tokenizer.train(files, trainer)
+        print(f'saving tokenizer to {output_file}')
+        tokenizer.save(output_file)
+    tokenizer.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[
+            ("[CLS]", tokenizer.token_to_id("[CLS]")),
+            ("[SEP]", tokenizer.token_to_id("[SEP]")),
+        ],
+    )
+    return tokenizer
+
 
 def get_batch(split):
     data = DATA[split]
@@ -59,25 +90,23 @@ def load_checkpoint(model, optim):
 
 
 def main(args):
-    # obtain character vocab from data
-    with open(args.data, 'r') as fp:
-        text = fp.read()
-    chars = sorted(list(set(text)))
+    print(f'DEVICE: {DEVICE}')
+    with open(args.data) as f:
+        text = f.read()
+    tokenizer = train_tokenizer()
 
     # creating numerical encoding for chars
-    stoi = {ch:i for i,ch in enumerate(chars)}
-    itos = {i:ch for i,ch in enumerate(chars)}
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda n: ''.join(itos[i] for i in n)
+    encode = tokenizer.encode
+    decode = tokenizer.decode
 
-    data = torch.tensor(encode(text), dtype=torch.long)
+    data = torch.tensor(encode(text).ids, dtype=torch.long, device=DEVICE)
 
     n = int(0.9 * len(data))
     DATA[TRAIN] = data[:n]
     DATA[EVAL] = data[n:]
 
     # create model
-    model = GPT(len(chars))
+    model = GPT(tokenizer.get_vocab_size())
     m = model.to(DEVICE)
     
     # create optimizer
@@ -97,8 +126,9 @@ def main(args):
         return
 
     # training loop
+    print('starting training')
     for i in tqdm(range(epoch, MAX_ITERS)):
-        if i % EVAL_INTERVAL == 0:
+        if i != epoch and i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model)
             print(f"step {i} train loss {losses['train']} eval loss {losses['eval']}")
 
