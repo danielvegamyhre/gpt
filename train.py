@@ -2,7 +2,7 @@
 import os
 import torch
 import argparse
-from models.gpt import GPT, BATCH_SIZE, SEQ_LEN
+from gpt import GPT, BATCH_SIZE, SEQ_LEN
 from tqdm import tqdm
 
 from tokenizers import Tokenizer
@@ -13,7 +13,6 @@ from tokenizers.processors import TemplateProcessing
 
 
 # hyperparameters
-MAX_ITERS = 5000
 LEARNING_RATE = 1e-3
 DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
 EVAL_INTERVAL = 1000
@@ -21,22 +20,20 @@ EVAL_ITERS = 100
 TRAIN = 'train'
 EVAL = 'eval'
 DATA = {TRAIN: '', EVAL: ''}
-CHECKPOINT_PATH = 'model.pt'
 CHECKPOINT_INTERVAL = 1000
 
-def train_tokenizer():
-    output_file ="data/tokenizer-wiki.json"
-    if os.path.exists(output_file):
-        print(f'loading tokenizer from {output_file}')
-        tokenizer = Tokenizer.from_file(output_file)
+def get_tokenizer(train: str, eval: str, tokenizer_file: str) -> Tokenizer:
+    if os.path.exists(tokenizer_file):
+        print(f'loading tokenizer from {tokenizer_file}')
+        tokenizer = Tokenizer.from_file(tokenizer_file)
     else:
         tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
         trainer = BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"])
         tokenizer.pre_tokenizer = Whitespace()
-        files = [f"data/wikitext-103-raw/wiki.{split}.raw" for split in ["test", "train", "valid"]]
+        files = [train, eval]
         tokenizer.train(files, trainer)
-        print(f'saving tokenizer to {output_file}')
-        tokenizer.save(output_file)
+        print(f'saving tokenizer to {tokenizer_file}')
+        tokenizer.save(tokenizer_file)
     tokenizer.post_processor = TemplateProcessing(
         single="[CLS] $A [SEP]",
         pair="[CLS] $A [SEP] $B:1 [SEP]:1",
@@ -70,14 +67,14 @@ def estimate_loss(model):
     model.train()
     return out
 
-def save_checkpoint(epoch, loss, model, optim):
+def save_checkpoint(path, epoch, loss, model, optim):
     print(f'checkpointing at epoch {epoch}')
     torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optim.state_dict(),
             'loss': loss,
-            }, CHECKPOINT_PATH)
+            }, path)
 
 def load_checkpoint(model, optim):
     checkpoint = torch.load(CHECKPOINT_PATH)
@@ -88,22 +85,46 @@ def load_checkpoint(model, optim):
     print(f'loaded checkpoint from {CHECKPOINT_PATH} at epoch {epoch}')
     return epoch, loss
 
+def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
+    train_out = f'{train}_tokenized' 
+    eval_out = f'{eval}_tokenized' 
 
-def main(args):
-    print(f'DEVICE: {DEVICE}')
-    with open(args.data) as f:
-        text = f.read()
-    tokenizer = train_tokenizer()
+    # load preprocessed data if we have it, otherwise preprocess the raw dataset
+    if os.path.exists(train_out):
+        DATA[TRAIN] = torch.load(train_out)
+    else:
+        print(f'tokenizing traing data: {train}')
+        with open(args.train) as f:
+            text = f.read()
+            
+        # tokenize training data
+        DATA[TRAIN] = tokenizer.encode(text).ids
 
-    # creating numerical encoding for chars
-    encode = tokenizer.encode
-    decode = tokenizer.decode
+        # store pre-processed training data 
+        torch.save(torch.tensor(DATA[TRAIN], dtype=torch.long, device=DEVICE), train_out)
 
-    data = torch.tensor(encode(text).ids, dtype=torch.long, device=DEVICE)
+    # load preprocessed data if we have it, otherwise preprocess the raw dataset
+    if os.path.exists(eval_out):
+        DATA[EVAL] = torch.load(eval_out)
+    else:
+        print(f'tokenzing eval data: {eval}')
+        with open(args.eval) as f:
+            text = f.read()
+            
+        # tokenize training data
+        DATA[EVAL] = tokenizer.encode(text).ids
+        
+        # store pre-processed training data 
+        torch.save(torch.tensor(DATA[EVAL], dtype=torch.long, device=DEVICE), eval_out)
 
-    n = int(0.9 * len(data))
-    DATA[TRAIN] = data[:n]
-    DATA[EVAL] = data[n:]
+def main(args: argparse.Namespace):
+    print(f'device: {DEVICE}')
+
+    # train tokenizer
+    tokenizer = get_tokenizer(args.train, args.eval, args.tokenizer)
+
+    preprocess_data(args.train, args.eval, tokenizer)
+    print('finished loading preprocessed data')
 
     # create model
     model = GPT(tokenizer.get_vocab_size())
@@ -114,20 +135,20 @@ def main(args):
     epoch, loss = 0, float('inf')
 
     # load from checkpoint if it exists
-    if os.path.isfile(CHECKPOINT_PATH):
-        epoch, loss =load_checkpoint(model, optim)
+    if os.path.isfile(args.checkpoint):
+        epoch, loss = load_checkpoint(args.checkpoint, model, optim)
 
     # if we are just generating output and not training
     if args.generate:
         print(f'generating output of length {args.generate}')
         context = torch.zeros((1,1), dtype=torch.long, device=DEVICE)
-        generate = lambda n: decode(m.generate(idx=context, max_new_tokens=n)[0].tolist())
+        generate = lambda n: tokenizer.decode(m.generate(idx=context, max_new_tokens=n)[0].tolist())
         print(generate(300))
         return
 
     # training loop
     print('starting training')
-    for i in tqdm(range(epoch, MAX_ITERS)):
+    for i in tqdm(range(epoch, args.epochs)):
         if i != epoch and i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model)
             print(f"step {i} train loss {losses['train']} eval loss {losses['eval']}")
@@ -139,11 +160,15 @@ def main(args):
         optim.step()
 
         if i != epoch and i % CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(i, loss, m, optim)
+            save_checkpoint(args.checkpoint, i, loss, m, optim)
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
-    argparser.add_argument('--data', type=str, help='train <file>: train GPT on dataset', required=False)
-    argparser.add_argument('--generate', type=int, help='generate <N>: generate output of length N')
+    argparser.add_argument('--train', type=str, help='training data file')
+    argparser.add_argument('--eval', type=str, help='eval data file')
+    argparser.add_argument('--generate', type=int, help='generate output of length N')
+    argparser.add_argument('--tokenizer', type=str, help="tokenizer JSON file", default="tokenizer/default.json")
+    argparser.add_argument('--checkpoint', type=str, help="model checkpoint file")
+    argparser.add_argument('--epochs', type=int, help='number of training epochs')
     args = argparser.parse_args()
     main(args)
