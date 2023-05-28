@@ -2,11 +2,17 @@
 import os
 import torch
 import argparse
-from models.gpt import GPT, BATCH_SIZE, SEQ_LEN
+from gpt import GPT, BATCH_SIZE, SEQ_LEN
 from tqdm import tqdm
 
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.processors import TemplateProcessing
+
+
 # hyperparameters
-MAX_ITERS = 5000
 LEARNING_RATE = 1e-3
 DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
 EVAL_INTERVAL = 1000
@@ -14,8 +20,30 @@ EVAL_ITERS = 100
 TRAIN = 'train'
 EVAL = 'eval'
 DATA = {TRAIN: '', EVAL: ''}
-CHECKPOINT_PATH = 'model.pt'
 CHECKPOINT_INTERVAL = 1000
+
+def get_tokenizer(train: str, eval: str, tokenizer_file: str) -> Tokenizer:
+    if os.path.exists(tokenizer_file):
+        print(f'loading tokenizer from {tokenizer_file}')
+        tokenizer = Tokenizer.from_file(tokenizer_file)
+    else:
+        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+        trainer = BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"])
+        tokenizer.pre_tokenizer = Whitespace()
+        files = [train, eval]
+        tokenizer.train(files, trainer)
+        print(f'saving tokenizer to {tokenizer_file}')
+        tokenizer.save(tokenizer_file)
+    tokenizer.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[
+            ("[CLS]", tokenizer.token_to_id("[CLS]")),
+            ("[SEP]", tokenizer.token_to_id("[SEP]")),
+        ],
+    )
+    return tokenizer
+
 
 def get_batch(split):
     data = DATA[split]
@@ -39,45 +67,68 @@ def estimate_loss(model):
     model.train()
     return out
 
-def save_checkpoint(epoch, loss, model, optim):
+def save_checkpoint(path, epoch, loss, model, optim):
     print(f'checkpointing at epoch {epoch}')
     torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optim.state_dict(),
             'loss': loss,
-            }, CHECKPOINT_PATH)
+            }, path)
 
-def load_checkpoint(model, optim):
-    checkpoint = torch.load(CHECKPOINT_PATH)
+def load_checkpoint(path, model, optim):
+    checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model_state_dict'])
     optim.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
-    print(f'loaded checkpoint from {CHECKPOINT_PATH} at epoch {epoch}')
+    print(f'loaded checkpoint from {path} at epoch {epoch}')
     return epoch, loss
 
+def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
+    train_out = f'{train}_tokenized' 
+    eval_out = f'{eval}_tokenized' 
 
-def main(args):
-    # obtain character vocab from data
-    with open(args.data, 'r') as fp:
-        text = fp.read()
-    chars = sorted(list(set(text)))
+    # load preprocessed data if we have it, otherwise preprocess the raw dataset
+    if os.path.exists(train_out):
+        DATA[TRAIN] = torch.load(train_out)
+    else:
+        print(f'tokenizing traing data: {train}')
+        with open(args.train) as f:
+            text = f.read()
+            
+        encoded = tokenizer.encode(text).ids
+        DATA[TRAIN] = torch.tensor(encoded, dtype=torch.long, device=DEVICE)
 
-    # creating numerical encoding for chars
-    stoi = {ch:i for i,ch in enumerate(chars)}
-    itos = {i:ch for i,ch in enumerate(chars)}
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda n: ''.join(itos[i] for i in n)
+        # store pre-processed training data 
+        torch.save(DATA[TRAIN], train_out)
 
-    data = torch.tensor(encode(text), dtype=torch.long)
+    # load preprocessed data if we have it, otherwise preprocess the raw dataset
+    if os.path.exists(eval_out):
+        DATA[EVAL] = torch.load(eval_out)
+    else:
+        print(f'tokenzing eval data: {eval}')
+        with open(args.eval) as f:
+            text = f.read()
+            
+        # tokenize training data
+        encoded = tokenizer.encode(text).ids
+        DATA[EVAL] = torch.tensor(encoded, dtype=torch.long, device=DEVICE)
+        
+        # store pre-processed training data 
+        torch.save(DATA[EVAL], eval_out)
 
-    n = int(0.9 * len(data))
-    DATA[TRAIN] = data[:n]
-    DATA[EVAL] = data[n:]
+def main(args: argparse.Namespace):
+    print(f'device: {DEVICE}')
+
+    # train tokenizer
+    tokenizer = get_tokenizer(args.train, args.eval, args.tokenizer)
+
+    preprocess_data(args.train, args.eval, tokenizer)
+    print('finished loading preprocessed data')
 
     # create model
-    model = GPT(len(chars))
+    model = GPT(tokenizer.get_vocab_size())
     m = model.to(DEVICE)
     
     # create optimizer
@@ -85,19 +136,20 @@ def main(args):
     epoch, loss = 0, float('inf')
 
     # load from checkpoint if it exists
-    if os.path.isfile(CHECKPOINT_PATH):
-        epoch, loss = load_checkpoint(model, optim)
+    if os.path.isfile(args.checkpoint):
+        epoch, loss = load_checkpoint(args.checkpoint, model, optim)
 
     # if we are just generating output and not training
     if args.generate:
         print(f'generating output of length {args.generate}')
         context = torch.zeros((1,1), dtype=torch.long, device=DEVICE)
-        generate = lambda n: decode(m.generate(idx=context, max_new_tokens=n)[0].tolist())
+        generate = lambda n: tokenizer.decode(m.generate(idx=context, max_new_tokens=n)[0].tolist())
         print(generate(300))
         return
 
     # training loop
-    for i in tqdm(range(epoch, MAX_ITERS)):
+    print('starting training')
+    for i in tqdm(range(epoch, args.epochs)):
         if i != epoch and i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model)
             print(f"step {i} train loss {losses['train']} eval loss {losses['eval']}")
@@ -109,11 +161,15 @@ def main(args):
         optim.step()
 
         if i != epoch and i % CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(i, loss, m, optim)
+            save_checkpoint(args.checkpoint, i, loss, m, optim)
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
-    argparser.add_argument('--data', type=str, help='train <file>: train GPT on dataset', required=False)
-    argparser.add_argument('--generate', type=int, help='generate <N>: generate output of length N')
+    argparser.add_argument('--train', type=str, help='training data file')
+    argparser.add_argument('--eval', type=str, help='eval data file')
+    argparser.add_argument('--generate', type=int, help='generate output of length N')
+    argparser.add_argument('--tokenizer', type=str, help="tokenizer JSON file", default="tokenizer/default.json")
+    argparser.add_argument('--checkpoint', type=str, help="model checkpoint file")
+    argparser.add_argument('--epochs', type=int, help='number of training epochs')
     args = argparser.parse_args()
     main(args)

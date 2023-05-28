@@ -4,7 +4,7 @@ from torch.nn import functional as F
 
 BATCH_SIZE = 64 # number of independent examples to process at once
 SEQ_LEN = 256 # maximum context length for one input
-EMBED_SIZE = 384    # embedding dimension size
+EMBED_SIZE = 384 # embedding dimension size
 DROPOUT = 0.2
 DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
