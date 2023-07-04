@@ -20,7 +20,6 @@ EVAL_ITERS = 100
 TRAIN = 'train'
 EVAL = 'eval'
 DATA = {TRAIN: '', EVAL: ''}
-CHECKPOINT_INTERVAL = 1000
 
 def get_tokenizer(train: str, eval: str, tokenizer_file: str) -> Tokenizer:
     if os.path.exists(tokenizer_file):
@@ -43,7 +42,6 @@ def get_tokenizer(train: str, eval: str, tokenizer_file: str) -> Tokenizer:
         ],
     )
     return tokenizer
-
 
 def get_batch(split):
     data = DATA[split]
@@ -93,7 +91,7 @@ def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
     if os.path.exists(train_out):
         DATA[TRAIN] = torch.load(train_out)
     else:
-        print(f'tokenizing traing data: {train}')
+        print(f'tokenizing training data: {train}')
         with open(args.train) as f:
             text = f.read()
             
@@ -107,7 +105,7 @@ def preprocess_data(train: str, eval: str, tokenizer: Tokenizer):
     if os.path.exists(eval_out):
         DATA[EVAL] = torch.load(eval_out)
     else:
-        print(f'tokenzing eval data: {eval}')
+        print(f'tokenizing eval data: {eval}')
         with open(args.eval) as f:
             text = f.read()
             
@@ -135,9 +133,11 @@ def main(args: argparse.Namespace):
     optim = torch.optim.AdamW(m.parameters(), lr=1e-3)
     epoch, loss = 0, float('inf')
 
-    # load from checkpoint if it exists
-    if os.path.isfile(args.checkpoint):
-        epoch, loss = load_checkpoint(args.checkpoint, model, optim)
+    # load checkpoint if specified
+    if args.load_checkpoint:
+        if not os.path.isfile(args.load_checkpoint):
+            raise FileNotFoundError(f"checkpoint file does not exist: {args.load_checkpoint}")
+        epoch, loss = load_checkpoint(args.load_checkpoint, model, optim)
 
     # if we are just generating output and not training
     if args.generate:
@@ -150,6 +150,7 @@ def main(args: argparse.Namespace):
     # training loop
     print('starting training')
     for i in tqdm(range(epoch, args.epochs)):
+        # don't estimate on first epoch
         if i != epoch and i % EVAL_INTERVAL == 0:
             losses = estimate_loss(model)
             print(f"step {i} train loss {losses['train']} eval loss {losses['eval']}")
@@ -160,8 +161,10 @@ def main(args: argparse.Namespace):
         loss.backward()
         optim.step()
 
-        if i != epoch and i % CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(args.checkpoint, i, loss, m, optim)
+        # don't checkpoint on first epoch even if it is divisible by checkpoint interval,
+        # and always checkpoint after the last epoch.
+        if (i != epoch and i % args.checkpoint_interval == 0) or i == args.epochs-1:
+            save_checkpoint(args.save_checkpoint, i, loss, m, optim)
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
@@ -169,7 +172,9 @@ if __name__ == '__main__':
     argparser.add_argument('--eval', type=str, help='eval data file')
     argparser.add_argument('--generate', type=int, help='generate output of length N')
     argparser.add_argument('--tokenizer', type=str, help="tokenizer JSON file", default="tokenizer/default.json")
-    argparser.add_argument('--checkpoint', type=str, help="model checkpoint file")
-    argparser.add_argument('--epochs', type=int, help='number of training epochs')
+    argparser.add_argument('--save-checkpoint', type=str, help="file to checkpoint model parameters to")
+    argparser.add_argument('--load-checkpoint', type=str, help="file to load model parameters from")
+    argparser.add_argument('--checkpoint-interval', type=int, help="number of epochs between checkpoints", default=1000)
+    argparser.add_argument('--epochs', type=int, help='number of training epochs', default=0)
     args = argparser.parse_args()
     main(args)
