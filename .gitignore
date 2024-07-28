@@ -1,2 +1,9 @@
+# python env
 .vscode/
-env/
+.env/
+__pycache__/
+
+# repo specific
+tokenizers/
+data/
+checkpoints/

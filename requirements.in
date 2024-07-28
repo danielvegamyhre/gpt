@@ -2,3 +2,6 @@ numpy
 torch
 tqdm
 tokenizers
+datasets
+tiktoken
+matplotlib

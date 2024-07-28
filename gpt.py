@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-BATCH_SIZE = 64 # number of independent examples to process at once
+NUM_LAYERS = 6
+NUM_HEADS = 6
 SEQ_LEN = 256 # maximum context length for one input
 EMBED_SIZE = 384 # embedding dimension size
 DROPOUT = 0.2
@@ -29,21 +30,21 @@ class Head(nn.Module):
         self.key = nn.Linear(EMBED_SIZE, head_size, bias=False)
         self.query = nn.Linear(EMBED_SIZE, head_size, bias=False)
         self.value = nn.Linear(EMBED_SIZE, head_size, bias=False)
-        self.dropout = nn.Dropout(DROPOUT)
         self.register_buffer('tril', torch.tril(torch.ones(SEQ_LEN,SEQ_LEN)))
+        self.dropout = nn.Dropout(DROPOUT)
 
     def forward(self, x):
         B,T,C = x.shape
         k = self.key(x) # (B, T, head_size)
         q = self.query(x) # (B, T, head_size)
         # compute attention scores / affinities
-        wei = q @ k.transpose(-2, -1) * C**0.5# (B,T,head_size) * (B,head_size,T) = (B,T,T)  
+        wei = q @ k.transpose(-2, -1) / k.shape[-1] ** 0.5 # (B,T,head_size) * (B,head_size,T) = (B,T,T)  
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B,T,T)
         wei = F.softmax(wei, dim=-1) # (B,T,T)
         wei = self.dropout(wei)
         # perform weighted aggregation of values
-        v = self.value(x)
-        out = wei @ v
+        v = self.value(x) # (B, T, head_size)
+        out = wei @ v  # (B, T, T) @ (B, T, head_size) = (B, T, head_size)
         return out
 
 class MultiHeadAttention(nn.Module):
@@ -61,14 +62,14 @@ class MultiHeadAttention(nn.Module):
 
 class Block(nn.Module):
     '''Transformer block'''
-    def __init__(self, embd, num_heads):
+    def __init__(self, num_embd, num_heads):
         super().__init__()
         # head size = embedding dim / num heads
-        head_size = EMBED_SIZE // num_heads
+        head_size = num_embd // num_heads
         self.sa = MultiHeadAttention(num_heads, head_size)
-        self.ffwd = FeedForward(EMBED_SIZE)
-        self.ln1 = nn.LayerNorm(EMBED_SIZE)
-        self.ln2 = nn.LayerNorm(EMBED_SIZE)
+        self.ffwd = FeedForward(num_embd)
+        self.ln1 = nn.LayerNorm(num_embd)
+        self.ln2 = nn.LayerNorm(num_embd)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -80,11 +81,7 @@ class GPT(nn.Module):
     super().__init__()
     self.token_embedding_table = nn.Embedding(vocab_size, EMBED_SIZE)
     self.position_embedding_table = nn.Embedding(SEQ_LEN, EMBED_SIZE)
-    self.blocks = nn.Sequential(
-        Block(EMBED_SIZE, 4),
-        Block(EMBED_SIZE, 4),
-        Block(EMBED_SIZE, 4),
-    )
+    self.blocks = nn.Sequential(*[Block(EMBED_SIZE, NUM_HEADS) for _ in range(NUM_LAYERS)])
     self.ln_f = nn.LayerNorm(EMBED_SIZE) # final layer norm
     self.lm_head = nn.Linear(EMBED_SIZE, vocab_size)
     self.apply(self._init_weights)
