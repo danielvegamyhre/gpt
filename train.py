@@ -79,6 +79,7 @@ def save_checkpoint(path, epoch, loss, model, optim):
             }, path)
 
 def load_checkpoint(path, model, optim):
+    print(f'loading checkpiont from path {path}')
     checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model_state_dict'])
     optim.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -163,7 +164,8 @@ def main(args: argparse.Namespace):
         print(f'generating output of length {args.generate}')
         context = torch.zeros((1,1), dtype=torch.long, device=DEVICE)
         generate = lambda n: tokenizer.decode(model.generate(idx=context, max_new_tokens=n)[0].tolist())
-        print(generate(args.generate))
+        output = generate(args.generate)[1:] # strip leading 0 unicode codepoint, from torch.zeros above
+        print(output)
         return 
     
     # training loop
